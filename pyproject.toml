@@ -1,0 +1,16 @@
+[project]
+name = "unet-tsst"
+version = "0.1.0"
+description = "Time series style transfer with a multi-resolution U-Net diffusion model."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Mayank" }]
+dependencies = [
+  "numpy",
+  "torch",
+  "matplotlib",
+]
+
+[tool.uv]
+# uv will install dependencies from the [project] table.

@@ -1,0 +1,81 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated paper."
+title: "DiffTSST: Time Series Style Transfer"
+authors:
+  - family-names: Nagda
+    given-names: Mayank
+  - family-names: Ostheimer
+    given-names: Phil
+  - family-names: Arweiler
+    given-names: Justus
+  - family-names: Jungjohann
+    given-names: Indra
+  - family-names: Werner
+    given-names: Jennifer
+  - family-names: Wagner
+    given-names: Dennis
+  - family-names: Muraleedharan
+    given-names: Aparna
+  - family-names: Jafari
+    given-names: Pouya
+  - family-names: Schmid
+    given-names: Jochen
+  - family-names: Jirasek
+    given-names: Fabian
+  - family-names: Burger
+    given-names: Jakob
+  - family-names: Bortz
+    given-names: Michael
+  - family-names: Hasse
+    given-names: Hans
+  - family-names: Mandt
+    given-names: Stephan
+  - family-names: Kloft
+    given-names: Marius
+  - family-names: Fellenz
+    given-names: Sophie
+
+preferred-citation:
+  type: conference-paper
+  title: "Style Transfer for High-Fidelity Time Series Augmentation"
+  authors:
+    - family-names: Nagda
+      given-names: Mayank
+    - family-names: Ostheimer
+      given-names: Phil
+    - family-names: Arweiler
+      given-names: Justus
+    - family-names: Jungjohann
+      given-names: Indra
+    - family-names: Werner
+      given-names: Jennifer
+    - family-names: Wagner
+      given-names: Dennis
+    - family-names: Muraleedharan
+      given-names: Aparna
+    - family-names: Jafari
+      given-names: Pouya
+    - family-names: Schmid
+      given-names: Jochen
+    - family-names: Jirasek
+      given-names: Fabian
+    - family-names: Burger
+      given-names: Jakob
+    - family-names: Bortz
+      given-names: Michael
+    - family-names: Hasse
+      given-names: Hans
+    - family-names: Mandt
+      given-names: Stephan
+    - family-names: Kloft
+      given-names: Marius
+    - family-names: Fellenz
+      given-names: Sophie
+  conference:
+    name: "European Conference on Machine Learning and Principles and Practice of Knowledge Discovery in Databases (ECML PKDD)"
+    year: 2025
+    track: "Workshop & Tutorial Track"
+    workshop: "Synthetic Data for AI Trustworthiness and Evolution (SynDAiTE)"
+  identifiers:
+    - type: other
+      value: "Paper ID 217"
