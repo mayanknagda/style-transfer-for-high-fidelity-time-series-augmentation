@@ -2,6 +2,7 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
+import pywt
 from model import MultiResUNet1D
 
 
@@ -209,31 +210,85 @@ def denormalize(series, mean, std):
     return series * std + mean
 
 
-def generate_series(
+########################
+# Baseline methods
+########################
+def wavelet_style_transfer(content_series, style_series, wavelet="haar", level=3):
+    """
+    Wavelet baseline: keep the low-frequency content component from `content_series`
+    and high-frequency style components from `style_series`.
+    """
+    content_series = _to_1d_float_array(content_series, "content_series")
+    style_series = _to_1d_float_array(style_series, "style_series")
+    _validate_same_length(content_series, style_series)
+
+    content_coeffs = pywt.wavedec(content_series, wavelet, level=level)
+    style_coeffs = pywt.wavedec(style_series, wavelet, level=level)
+    combined_coeffs = [content_coeffs[0]] + style_coeffs[1:]
+    reconstructed_series = pywt.waverec(combined_coeffs, wavelet)
+    return reconstructed_series[: len(content_series)]
+
+
+def multi_scale_decompose_1d(x, num_scales=3, kernel_sizes=None):
+    """
+    1D multi-scale decomposition baseline using moving average filters.
+    """
+    if kernel_sizes is None:
+        kernel_sizes = [3, 5, 15]
+    if len(kernel_sizes) != num_scales:
+        raise ValueError("Number of scales must match kernel_sizes length.")
+
+    x = _to_1d_float_array(x, "x")
+    current = x.copy()
+    bands = []
+
+    for k in kernel_sizes:
+        smooth = np.convolve(current, np.ones(k) / k, mode="same")
+        residual = current - smooth
+        bands.append(residual)
+        current = smooth
+
+    return {"content": current, "bands": bands}
+
+
+def stitching(content_series, style_series, num_scales=1, kernel_sizes=None):
+    """
+    Multi-scale baseline: use content low-frequency signal from content and
+    style residual bands from style.
+    """
+    if kernel_sizes is None:
+        kernel_sizes = [3]
+
+    content_series = _to_1d_float_array(content_series, "content_series")
+    style_series = _to_1d_float_array(style_series, "style_series")
+    _validate_same_length(content_series, style_series)
+
+    content_decomp = multi_scale_decompose_1d(content_series, num_scales, kernel_sizes)
+    style_decomp = multi_scale_decompose_1d(style_series, num_scales, kernel_sizes)
+    return content_decomp["content"] + sum(style_decomp["bands"])
+
+
+def sticthing(content_series, style_series, num_scales=1, kernel_sizes=None):
+    """
+    Backward-compatible alias for the requested baseline name.
+    """
+    return stitching(
+        content_series=content_series,
+        style_series=style_series,
+        num_scales=num_scales,
+        kernel_sizes=kernel_sizes,
+    )
+
+
+def _generate_series_norm(
     content_series, style_series, model, device, c_c=1, c_s=0, num_steps=500
 ):
     """
-    Generate a time series that preserves the content of one series while adopting the style of another.
-
-    Steps:
-    1) Decompose both content and style series.
-    2) Normalize the content band and style bands separately, storing their mean and variance.
-    3) Mix the content bands from both series using c_c and c_s.
-    4) Perform DDPM-based generation.
-    5) Decompose the generated series and rescale its content and style components before reconstructing the final output.
-
-    Args:
-    - content_series (numpy array): The input content series.
-    - style_series (numpy array): The input style series.
-    - model (torch.nn.Module): Trained model for generation.
-    - device (torch.device): Computation device.
-    - c_c (float): Weight for content preservation.
-    - c_s (float): Weight for content adaptation.
-    - num_steps (int): Number of diffusion steps.
-
-    Returns:
-    - final_generated_series (numpy array): The reconstructed generated time series.
+    Generate diffusion output in normalized space.
     """
+    if np.isclose(c_c + c_s, 0.0):
+        raise ValueError("c_c + c_s must be non-zero for diffusion.")
+
     # Convert input series to tensors
     content_tensor = (
         torch.tensor(content_series, dtype=torch.float32)
@@ -252,120 +307,11 @@ def generate_series(
     content_decomp = multi_scale_decompose(content_tensor, mode="infer")
     style_decomp = multi_scale_decompose(style_tensor, mode="infer")
 
-    # Extract content band and style bands
-    content_band = content_decomp["content"]
-    style_content_band = style_decomp["content"]  # Content from the style series
-    style_bands = style_decomp["bands"]  # List of 3 style bands
-    # Step 2: Normalize content band and style bands separately
-    content_band, content_mean, content_std = normalize(
-        content_band.squeeze().squeeze().cpu().numpy()
-    )
-    style_content_band, style_content_mean, style_content_std = normalize(
-        style_content_band.squeeze().squeeze().cpu().numpy()
-    )
-
-    style_bands_norm = []
-    style_means, style_stds = [], []
-
-    for sb in style_bands:
-        sb_norm, sb_mean, sb_std = normalize(sb.squeeze().squeeze().cpu().numpy())
-        style_bands_norm.append(sb_norm)
-        style_means.append(sb_mean)
-        style_stds.append(sb_std)
-
-    # Step 3: Compute mixed content band using c_c and c_s
-    mixed_content_band = c_c * content_band + c_s * style_content_band
-    mixed_content_band = (
-        torch.tensor(mixed_content_band, dtype=torch.float32)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .to(device)
-    )
-    style_band_norm_in = []
-    for sb in style_bands_norm:
-        sb_in = (
-            torch.tensor(sb, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-        )
-        style_band_norm_in.append(sb_in)
-    # Step 4: Generate new series using DDPM
-    x_0 = ddpm_sample(
-        model, mixed_content_band, style_band_norm_in, device, T=num_steps
-    )
-    # Step 5: Decompose generated series and rescale components
-    generated_decomp = multi_scale_decompose(x_0, mode="infer")
-    generated_content = generated_decomp["content"]
-    generated_bands = generated_decomp["bands"]
-
-    # Rescale content using original content mean/std
-    content_mean = c_c * content_mean + c_s * style_content_mean
-    content_std = c_c * content_std + c_s * style_content_std
-    generated_content = denormalize(generated_content, content_mean, content_std)
-
-    # Rescale style bands using their original means/stds
-    generated_bands_rescaled = [
-        denormalize(generated_bands[i], style_means[i], style_stds[i])
-        for i in range(len(generated_bands))
-    ]
-
-    # Step 6: Reconstruct final generated series by summing up rescaled components
-    final_generated_series = generated_content + sum(generated_bands_rescaled)
-
-    return final_generated_series.squeeze().cpu().numpy()
-
-
-def generate_series_norm(
-    content_series, style_series, model, device, c_c=1, c_s=0, num_steps=500
-):
-    """
-    Generate a time series that preserves the content of one series while adopting the style of another.
-
-    Steps:
-    1) Decompose both content and style series.
-    2) Normalize the content band and style bands separately, storing their mean and variance.
-    3) Mix the content bands from both series using c_c and c_s.
-    4) Perform DDPM-based generation.
-    5) Decompose the generated series and rescale its content and style components before reconstructing the final output.
-
-    Args:
-    - content_series (numpy array): The input content series.
-    - style_series (numpy array): The input style series.
-    - model (torch.nn.Module): Trained model for generation.
-    - device (torch.device): Computation device.
-    - c_c (float): Weight for content preservation.
-    - c_s (float): Weight for content adaptation.
-    - num_steps (int): Number of diffusion steps.
-
-    Returns:
-    - final_generated_series (numpy array): The reconstructed generated time series.
-    """
-    # Convert input series to tensors
-    content_tensor = (
-        torch.tensor(content_series, dtype=torch.float32)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .to(device)
-    )
-    style_tensor = (
-        torch.tensor(style_series, dtype=torch.float32)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .to(device)
-    )
-
-    # Step 1: Multi-scale decomposition
-    content_decomp = multi_scale_decompose(content_tensor, mode="infer")
-    style_decomp = multi_scale_decompose(style_tensor, mode="infer")
-
-    # Extract content band and style bands
-    content_band = content_decomp["content"]
-    style_bands = style_decomp["bands"]  # List of 3 style bands
-
-    # Step 4: Generate new series using DDPM
+    # Mix low-frequency content and keep style residual bands as-is.
     content_band = (c_c * content_decomp["content"] + c_s * style_decomp["content"]) / (
         c_c + c_s
     )
-    x_0 = ddpm_sample(model, content_band, style_bands, device, T=num_steps)
-    # Step 5: Decompose generated series and rescale components
+    x_0 = ddpm_sample(model, content_band, style_decomp["bands"], device, T=num_steps)
 
     return x_0.squeeze().cpu().numpy()
 
@@ -381,17 +327,6 @@ def plot_generated_series(generated, content, style, output_path="generated.png"
     plt.title("Style Transfer via Diffusion Model")
     plt.savefig(output_path)
     plt.show()
-
-
-def main(content_series, style_series, checkpoint_path="checkpoints/", c_c=1, c_s=0):
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = MultiResUNet1D().to(device)
-    model = load_latest_checkpoint(model, checkpoint_path, device)
-    generated = generate_series(
-        content_series, style_series, model, device, num_steps=500, c_c=c_c, c_s=c_s
-    )
-    plot_generated_series(generated, content_series, style_series)
-
 
 def _to_1d_float_array(series, name):
     array = np.asarray(series, dtype=np.float32).squeeze()
@@ -411,15 +346,28 @@ def _validate_series_length(content_series, style_series, expected_length=128):
         )
 
 
+def _validate_same_length(content_series, style_series):
+    if content_series.shape[0] != style_series.shape[0]:
+        raise ValueError(
+            "content_series and style_series must have the same length, got "
+            f"{content_series.shape[0]} and {style_series.shape[0]}."
+        )
+
+
 @torch.no_grad()
 def style_transfer(
     style_series,
     content_series,
     denorm="content",
+    method="diffusion",
     checkpoint_path="checkpoints/",
     num_steps=500,
     c_c=1.0,
     c_s=0.0,
+    wavelet="haar",
+    level=3,
+    num_scales=1,
+    kernel_sizes=[3],
     device=None,
     model=None,
 ):
@@ -433,10 +381,18 @@ def style_transfer(
             - "content": scale by the content series mean/std
             - "style": scale by the style series mean/std
             - "none": keep normalized output (no denorm)
+        method (str): Transfer method. One of:
+            - "diffusion" (default)
+            - "wavelet"
+            - "multiscale"
         checkpoint_path (str): Folder containing model checkpoints (*.pth).
         num_steps (int): Number of diffusion steps used during sampling.
         c_c (float): Weight for content preservation.
         c_s (float): Weight for style-content influence.
+        wavelet (str): Wavelet family used when `method="wavelet"`.
+        level (int): Wavelet decomposition depth when `method="wavelet"`.
+        num_scales (int): Number of smoothing levels when `method="multiscale"`.
+        kernel_sizes (list[int]|None): Moving-average kernels for `method="multiscale"`.
         device (torch.device|str|None): Optional device override.
         model (torch.nn.Module|None): Optional pre-loaded model instance.
 
@@ -449,75 +405,58 @@ def style_transfer(
     """
     if denorm not in {"content", "style", "none"}:
         raise ValueError("denorm must be 'content', 'style', or 'none'.")
-    if num_steps > 500:
+    if method not in {"diffusion", "wavelet", "multiscale"}:
+        raise ValueError("method must be 'diffusion', 'wavelet', or 'multiscale'.")
+    if method == "diffusion" and num_steps > 500:
         raise ValueError("num_steps must be <= 500 for the provided checkpoints.")
 
     style_series = _to_1d_float_array(style_series, "style_series")
     content_series = _to_1d_float_array(content_series, "content_series")
-    _validate_series_length(content_series, style_series, expected_length=128)
+    _validate_same_length(content_series, style_series)
 
-    if device is None:
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(device)
-
-    if model is None:
-        model = MultiResUNet1D(T=500).to(device)
-        model = load_latest_checkpoint(model, checkpoint_path, device)
-    model.eval()
-
-    # Full-series normalization for user-facing outputs
+    # Full-series normalization for user-facing outputs and baseline methods
     normalized_style, style_mean, style_std = normalize(style_series)
     normalized_content, content_mean, content_std = normalize(content_series)
 
-    # Convert to tensors for decomposition
-    content_tensor = (
-        torch.tensor(content_series, dtype=torch.float32)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .to(device)
-    )
-    style_tensor = (
-        torch.tensor(style_series, dtype=torch.float32)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .to(device)
-    )
+    if method == "wavelet":
+        normalized_generated = wavelet_style_transfer(
+            content_series=normalized_content,
+            style_series=normalized_style,
+            wavelet=wavelet,
+            level=level,
+        )
+    elif method == "multiscale":
+        if kernel_sizes is None:
+            kernel_sizes = [3]
+        normalized_generated = stitching(
+            content_series=normalized_content,
+            style_series=normalized_style,
+            num_scales=num_scales,
+            kernel_sizes=kernel_sizes,
+        )
+    else:
+        _validate_series_length(content_series, style_series, expected_length=128)
+        if np.isclose(c_c + c_s, 0.0):
+            raise ValueError("c_c + c_s must be non-zero for diffusion.")
+        if device is None:
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        else:
+            device = torch.device(device)
 
-    # Multi-scale decomposition
-    content_decomp = multi_scale_decompose(content_tensor, mode="infer")
-    style_decomp = multi_scale_decompose(style_tensor, mode="infer")
+        if model is None:
+            model = MultiResUNet1D(T=500).to(device)
+            model = load_latest_checkpoint(model, checkpoint_path, device)
+        model.eval()
 
-    # Normalize content band and style bands (model expects normalized inputs)
-    content_band = content_decomp["content"]
-    style_content_band = style_decomp["content"]
-    style_bands = style_decomp["bands"]
-
-    content_band_np, _, _ = normalize(content_band.squeeze().squeeze().cpu().numpy())
-    style_content_band_np, _, _ = normalize(
-        style_content_band.squeeze().squeeze().cpu().numpy()
-    )
-
-    style_bands_norm = []
-    for sb in style_bands:
-        sb_norm, _, _ = normalize(sb.squeeze().squeeze().cpu().numpy())
-        style_bands_norm.append(sb_norm)
-
-    mixed_content_band = c_c * content_band_np + c_s * style_content_band_np
-    mixed_content_band = (
-        torch.tensor(mixed_content_band, dtype=torch.float32)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .to(device)
-    )
-    style_band_norm_in = [
-        torch.tensor(sb, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-        for sb in style_bands_norm
-    ]
-
-    normalized_generated = ddpm_sample(
-        model, mixed_content_band, style_band_norm_in, device, T=num_steps
-    ).squeeze().cpu().numpy()
+        normalized_generated = _generate_series_norm(
+            content_series=normalized_content,
+            style_series=normalized_style,
+            model=model,
+            device=device,
+            c_c=c_c,
+            c_s=c_s,
+            num_steps=num_steps,
+        )
 
     if denorm == "none":
         denorm_output = normalized_generated

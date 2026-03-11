@@ -10,6 +10,8 @@ dependencies = [
   "numpy",
   "torch",
   "matplotlib",
+  "pywavelets",
+  "yfinance>=1.2.0",
 ]
 
 [tool.uv]
